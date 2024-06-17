@@ -619,7 +619,8 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        prompt: Union[str, List[str]] = None,
+        # prompt: Union[str, List[str]] = None,
+        prompt: Union[str, Dict[str, str]] = None,
         prompt_2: Optional[Union[str, List[str]]] = None,
         prompt_3: Optional[Union[str, List[str]]] = None,
         height: Optional[int] = None,
@@ -643,6 +644,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        single_layer_idxs: Optional[List[int]] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -739,62 +741,75 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         width = width or self.default_sample_size * self.vae_scale_factor
 
         # 1. Check inputs. Raise error if not correct
-        self.check_inputs(
-            prompt,
-            prompt_2,
-            prompt_3,
-            height,
-            width,
-            negative_prompt=negative_prompt,
-            negative_prompt_2=negative_prompt_2,
-            negative_prompt_3=negative_prompt_3,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-            callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
-        )
+        # self.check_inputs(
+        #     prompt,
+        #     prompt_2,
+        #     prompt_3,
+        #     height,
+        #     width,
+        #     negative_prompt=negative_prompt,
+        #     negative_prompt_2=negative_prompt_2,
+        #     negative_prompt_3=negative_prompt_3,
+        #     prompt_embeds=prompt_embeds,
+        #     negative_prompt_embeds=negative_prompt_embeds,
+        #     pooled_prompt_embeds=pooled_prompt_embeds,
+        #     negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+        #     callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
+        # )
 
         self._guidance_scale = guidance_scale
         self._clip_skip = clip_skip
         self._joint_attention_kwargs = joint_attention_kwargs
         self._interrupt = False
-
+        
+        self.single_layer_idxs = single_layer_idxs
+        
         # 2. Define call parameters
-        if prompt is not None and isinstance(prompt, str):
-            batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
-        else:
-            batch_size = prompt_embeds.shape[0]
+        # if prompt is not None and isinstance(prompt, str):
+        #     batch_size = 1
+        # elif prompt is not None and isinstance(prompt, list):
+        #     batch_size = len(prompt)
+        # else:
+        #     batch_size = prompt_embeds.shape[0]
+        batch_size = 1 #TODO: fixme
 
         device = self._execution_device
+        prompt_embeds_list = []
+        negative_prompt_embeds_list = []
+        pooled_prompt_embeds_list = []
+        negative_pooled_prompt_embeds_list = []
+        for prompt_ in [prompt["single"], prompt["rest"]]:
+            (
+                prompt_embeds_,
+                negative_prompt_embeds_,
+                pooled_prompt_embeds_,
+                negative_pooled_prompt_embeds_,
+            ) = self.encode_prompt(
+                prompt=prompt_,
+                prompt_2=prompt_2,
+                prompt_3=prompt_3,
+                negative_prompt=negative_prompt,
+                negative_prompt_2=negative_prompt_2,
+                negative_prompt_3=negative_prompt_3,
+                do_classifier_free_guidance=self.do_classifier_free_guidance,
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                device=device,
+                clip_skip=self.clip_skip,
+                num_images_per_prompt=num_images_per_prompt,
+            )
+            
 
-        (
-            prompt_embeds,
-            negative_prompt_embeds,
-            pooled_prompt_embeds,
-            negative_pooled_prompt_embeds,
-        ) = self.encode_prompt(
-            prompt=prompt,
-            prompt_2=prompt_2,
-            prompt_3=prompt_3,
-            negative_prompt=negative_prompt,
-            negative_prompt_2=negative_prompt_2,
-            negative_prompt_3=negative_prompt_3,
-            do_classifier_free_guidance=self.do_classifier_free_guidance,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-            device=device,
-            clip_skip=self.clip_skip,
-            num_images_per_prompt=num_images_per_prompt,
-        )
+            if self.do_classifier_free_guidance:
+                prompt_embeds_ = torch.cat([negative_prompt_embeds_, prompt_embeds_], dim=0)
+                pooled_prompt_embeds_ = torch.cat([negative_pooled_prompt_embeds_, pooled_prompt_embeds_], dim=0)
 
-        if self.do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+            prompt_embeds_list.append(prompt_embeds_)
+            negative_prompt_embeds_list.append(negative_prompt_embeds_)
+            pooled_prompt_embeds_list.append(pooled_prompt_embeds_)
+            negative_pooled_prompt_embeds_list.append(negative_pooled_prompt_embeds_)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
@@ -808,7 +823,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             num_channels_latents,
             height,
             width,
-            prompt_embeds.dtype,
+            prompt_embeds_list[0].dtype,
             device,
             generator,
             latents,
@@ -824,14 +839,14 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep,
-                    encoder_hidden_states=prompt_embeds,
-                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds_list,
+                    pooled_projections=pooled_prompt_embeds_list,
                     joint_attention_kwargs=self.joint_attention_kwargs,
                     return_dict=False,
+                    single_layer_idxs=self.single_layer_idxs,
                 )[0]
 
                 # perform guidance
