@@ -288,6 +288,14 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
                     "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
                 )
 
+        # height, width = hidden_states.shape[-2:]
+
+        # hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
+        # temb_single = self.time_text_embed(timestep, pooled_projections[0])
+        # temb = self.time_text_embed(timestep, pooled_projections[1])
+        # encoder_hidden_states_single = self.context_embedder(encoder_hidden_states[0])
+        # encoder_hidden_states = self.context_embedder(encoder_hidden_states[1])
+        
         height, width = hidden_states.shape[-2:]
 
         hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
@@ -295,37 +303,72 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         temb = self.time_text_embed(timestep, pooled_projections[1])
         encoder_hidden_states_single = self.context_embedder(encoder_hidden_states[0])
         encoder_hidden_states = self.context_embedder(encoder_hidden_states[1])
+
+        # Inject combined embeddings into the first block
+        # encoder_hidden_states_combined = torch.cat((encoder_hidden_states, encoder_hidden_states_single), dim=-1)
+        # temb_combined = torch.cat((temb, temb_single), dim=-1)
+        
+        # for idx, block in enumerate(self.transformer_blocks):
+        #     if self.training and self.gradient_checkpointing:
+
+        #         def create_custom_forward(module, return_dict=None):
+        #             def custom_forward(*inputs):
+        #                 if return_dict is not None:
+        #                     return module(*inputs, return_dict=return_dict)
+        #                 else:
+        #                     return module(*inputs)
+
+        #             return custom_forward
+
+        #         ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+        #         hidden_states = torch.utils.checkpoint.checkpoint(
+        #             create_custom_forward(block),
+        #             hidden_states,
+        #             encoder_hidden_states,
+        #             temb,
+        #             **ckpt_kwargs,
+        #         )
+
+        #     else:
+        #         if idx in single_layer_idxs:
+        #             encoder_hidden_states_single, hidden_states = block(
+        #             hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states_single, temb=temb_single
+        #         )
+        #         else:
+        #             encoder_hidden_states, hidden_states = block(
+        #                 hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+        #             )
+
         for idx, block in enumerate(self.transformer_blocks):
             if self.training and self.gradient_checkpointing:
-
                 def create_custom_forward(module, return_dict=None):
                     def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
+                        return module(*inputs, return_dict=return_dict)
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
-                    encoder_hidden_states,
-                    temb,
-                    **ckpt_kwargs,
+                    encoder_hidden_states_combined,
+                    temb_combined
                 )
-
             else:
                 if idx in single_layer_idxs:
-                    encoder_hidden_states_single, hidden_states = block(
-                    hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states_single, temb=temb_single
-                )
+                    # Inject combined embeddings only into the specified layers
+                    encoder_hidden_states_combined = torch.add(encoder_hidden_states, encoder_hidden_states_single) / 2
+                    temb_combined = torch.add(temb, temb_single) / 2
+                    encoder_hidden_states, hidden_states = block(
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=encoder_hidden_states_combined,
+                        temb=temb_combined
+                    )
                 else:
                     encoder_hidden_states, hidden_states = block(
-                        hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        temb=temb
                     )
-
+        
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
 
